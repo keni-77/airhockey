@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>エアホッケー（オンライン対戦版）</title>
+
+    <!-- WebRTCライブラリ (PeerJS) -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a1a;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        #gameContainer {
+            position: relative;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #gameCanvas {
+            background-color: #f4f6f8;
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.8);
+            border-radius: 16px;
+            border: 6px solid #2c3e50;
+            max-width: 95vw;
+            max-height: 90vh;
+            aspect-ratio: 1000 / 600;
+        }
+
+        #scoreBoard {
+            position: absolute;
+            top: 15px;
+            width: 85%;
+            display: flex;
+            justify-content: space-between;
+            color: rgba(255, 255, 255, 0.9);
+            font-size: 28px;
+            font-weight: bold;
+            pointer-events: none;
+            z-index: 5;
+        }
+        .p1-score { color: #2ecc71; text-shadow: 0 0 10px rgba(46,204,113,0.5); }
+        .p2-score { color: #3498db; text-shadow: 0 0 10px rgba(52,152,219,0.5); }
+
+        /* ロビー（接続メニュー） */
+        #lobbyOverlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+            color: white;
+        }
+
+        .lobby-box {
+            background: #2c3e50;
+            padding: 30px;
+            border-radius: 12px;
+            text-align: center;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            max-width: 320px;
+            width: 80%;
+        }
+
+        .lobby-box h2 { margin-top: 0; margin-bottom: 20px; }
+
+        .btn {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 6px;
+            cursor: pointer;
+            margin: 8px 0;
+            width: 100%;
+            transition: 0.2s;
+        }
+        .btn:hover { background: #2980b9; }
+        .btn-host { background: #2ecc71; }
+        .btn-host:hover { background: #27ae60; }
+
+        input[type="text"] {
+            width: 90%;
+            padding: 10px;
+            font-size: 18px;
+            text-align: center;
+            border-radius: 6px;
+            border: 2px solid #34495e;
+            margin-bottom: 10px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        #roomCodeDisplay {
+            font-size: 32px;
+            font-weight: bold;
+            color: #f1c40f;
+            letter-spacing: 4px;
+            margin: 15px 0;
+            user-select: all;
+        }
+
+        #statusText {
+            margin-top: 15px;
+            font-size: 14px;
+            color: #bdc3c7;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="gameContainer">
+        <div id="scoreBoard">
+            <div class="p1-score">1P (Host): <span id="p1Score">0</span></div>
+            <div class="p2-score">2P (Guest): <span id="p2Score">0</span></div>
+        </div>
+
+        <canvas id="gameCanvas" width="1000" height="600"></canvas>
+
+        <!-- オンライン接続用UI -->
+        <div id="lobbyOverlay">
+            <div class="lobby-box">
+                <h2>オンライン対戦</h2>
+                
+                <div id="initialMenu">
+                    <button class="btn btn-host" onclick="startHost()">部屋を作る (ホスト)</button>
+                    <button class="btn" onclick="showJoinInput()">部屋に入る (ゲスト)</button>
+                </div>
+
+                <div id="hostMenu" style="display: none;">
+                    <div>あいことば</div>
+                    <div id="roomCodeDisplay">----</div>
+                    <div>対戦相手の接続を待っています...</div>
+                </div>
+
+                <div id="joinMenu" style="display: none;">
+                    <input type="text" id="roomInput" placeholder="あいことばを入力" maxlength="5">
+                    <button class="btn" onclick="startJoin()">接続する</button>
+                    <button class="btn" style="background: #7f8c8d;" onclick="resetMenu()">戻る</button>
+                </div>
+
+                <div id="statusText">通信状態: 未接続</div>
+            </div>
+        </div>
+    </div>
+
+<script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+
+    // 内部解像度を固定 (1000x600)
+    const CANVAS_WIDTH = 1000;
+    const CANVAS_HEIGHT = 600;
+
+    // 物理パラメータ
+    const WALL_RESTITUTION = 0.8;
+    const MALLET_RESTITUTION = 0.45;
+    const FRICTION = 0.985;
+    const SUB_STEPS = 10;
+    const MAX_PUCK_SPEED = 55;
+
+    const goalHeight = CANVAS_HEIGHT / 2.3;
+    const malletRadius = Math.min(CANVAS_WIDTH, CANVAS_HEIGHT) / 12;
+    const puckRadius = malletRadius * 0.85;
+
+    let goalTop = CANVAS_HEIGHT / 2 - goalHeight / 2;
+    let goalBottom = CANVAS_HEIGHT / 2 + goalHeight / 2;
+
+    let puck = { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2, r: puckRadius, vx: 0, vy: 0, color: "#e74c3c" };
+    let p1 = { x: 120, y: CANVAS_HEIGHT / 2, r: malletRadius, vx: 0, vy: 0, color: "#2ecc71", score: 0, isHolding: false };
+    let p2 = { x: CANVAS_WIDTH - 120, y: CANVAS_HEIGHT / 2, r: malletRadius, vx: 0, vy: 0, color: "#3498db", score: 0, isHolding: false };
+
+    let p1Target = { x: p1.x, y: p1.y };
+    let p2Target = { x: p2.x, y: p2.y };
+
+    // 役割定義 ("none", "host", "guest")
+    let role = "none";
+    let peer = null;
+    let conn = null;
+
+    // --- 画面スケーリング考慮の座標取得 ---
+    function getPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        let clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        let clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+        let scaleX = CANVAS_WIDTH / rect.width;
+        let scaleY = CANVAS_HEIGHT / rect.height;
+
+        return {
+            x: (clientX - rect.left) * scaleX,
+            y: (clientY - rect.top) * scaleY
+        };
+    }
+
+    // --- 入力イベント処理 ---
+    function handlePointerStart(e) {
+        if (role === "none") return;
+        const pos = getPos(e);
+        let myMallet = role === "host" ? p1 : p2;
+
+        let dx = pos.x - myMallet.x;
+        let dy = pos.y - myMallet.y;
+        if (Math.sqrt(dx * dx + dy * dy) <= myMallet.r * 2.5) {
+            myMallet.isHolding = true;
+        }
+    }
+
+    function handlePointerMove(e) {
+        if (role === "none") return;
+        const pos = getPos(e);
+
+        if (role === "host" && p1.isHolding) {
+            p1Target.x = pos.x;
+            p1Target.y = pos.y;
+        } else if (role === "guest" && p2.isHolding) {
+            p2Target.x = pos.x;
+            p2Target.y = pos.y;
+            // ゲストは自分の操作目標をホストに送信
+            if (conn && conn.open) {
+                conn.send({ type: "input", target: p2Target });
+            }
+        }
+    }
+
+    function handlePointerEnd() {
+        if (role === "host") p1.isHolding = false;
+        if (role === "guest") p2.isHolding = false;
+    }
+
+    canvas.addEventListener('touchstart', (e) => { e.preventDefault(); handlePointerStart(e); }, {passive: false});
+    canvas.addEventListener('touchmove', (e) => { e.preventDefault(); handlePointerMove(e); }, {passive: false});
+    canvas.addEventListener('touchend', handlePointerEnd);
+
+    canvas.addEventListener('mousedown', handlePointerStart);
+    canvas.addEventListener('mousemove', handlePointerMove);
+    window.addEventListener('mouseup', handlePointerEnd);
+
+    // --- オンライン接続 (PeerJS) ロジック ---
+    function setStatus(text) {
+        document.getElementById("statusText").innerText = "通信状態: " + text;
+    }
+
+    function generateRoomCode() {
+        return Math.random().toString(36).substring(2, 7).toUpperCase();
+    }
+
+    function resetMenu() {
+        document.getElementById("initialMenu").style.display = "block";
+        document.getElementById("hostMenu").style.display = "none";
+        document.getElementById("joinMenu").style.display = "none";
+    }
+
+    function showJoinInput() {
+        document.getElementById("initialMenu").style.display = "none";
+        document.getElementById("joinMenu").style.display = "block";
+    }
+
+    // ホストとして部屋作成
+    function startHost() {
+        role = "host";
+        const roomCode = generateRoomCode();
+        document.getElementById("initialMenu").style.display = "none";
+        document.getElementById("hostMenu").style.display = "block";
+        document.getElementById("roomCodeDisplay").innerText = roomCode;
+        setStatus("部屋を作成中...");
+
+        peer = new Peer("hockey-" + roomCode);
+
+        peer.on('open', () => {
+            setStatus("ゲストの参加待ち");
+        });
+
+        peer.on('connection', (c) => {
+            conn = c;
+            setupConnection();
+        });
+
+        peer.on('error', (err) => {
+            alert("エラーが発生しました: " + err);
+            location.reload();
+        });
+    }
+
+    // ゲストとして参加
+    function startJoin() {
+        const inputCode = document.getElementById("roomInput").value.trim().toUpperCase();
+        if (!inputCode) return alert("あいことばを入力してください");
+
+        role = "guest";
+        setStatus("ホストに接続中...");
+
+        peer = new Peer();
+
+        peer.on('open', () => {
+            conn = peer.connect("hockey-" + inputCode);
+            setupConnection();
+        });
+
+        peer.on('error', (err) => {
+            alert("接続に失敗しました。あいことばを確認してください。");
+            setStatus("接続失敗");
+        });
+    }
+
+    // 接続成立後の処理
+    function setupConnection() {
+        conn.on('open', () => {
+            setStatus("接続完了！ゲーム開始");
+            document.getElementById("lobbyOverlay").style.display = "none";
+        });
+
+        conn.on('data', (data) => {
+            if (role === "host" && data.type === "input") {
+                // ホスト側：ゲストから入力座標を受信
+                p2Target = data.target;
+            } else if (role === "guest" && data.type === "state") {
+                // ゲスト側：ホストから最新のゲーム状態を受信
+                puck = data.puck;
+                p1 = data.p1;
+                p2 = data.p2;
+                document.getElementById('p1Score').innerText = data.scores.p1;
+                document.getElementById('p2Score').innerText = data.scores.p2;
+            }
+        });
+
+        conn.on('close', () => {
+            alert("対戦相手の通信が切断されました。");
+            location.reload();
+        });
+    }
+
+    // --- 物理演算ロジック (ホストのみが実行) ---
+    function resetPuck(scoredBy) {
+        puck.x = CANVAS_WIDTH / 2;
+        puck.y = CANVAS_HEIGHT / 2;
+        puck.vx = 0;
+        puck.vy = 0;
+        puck.x += (scoredBy === 'p2') ? -80 : 80;
+    }
+
+    function resolveWallCollision(p) {
+        let inGoalY = (p.y - p.r * 0.3 >= goalTop) && (p.y + p.r * 0.3 <= goalBottom);
+        if (p.y - p.r < 0) { p.y = p.r; if (p.vy < 0) p.vy *= -WALL_RESTITUTION; }
+        else if (p.y + p.r > CANVAS_HEIGHT) { p.y = CANVAS_HEIGHT - p.r; if (p.vy > 0) p.vy *= -WALL_RESTITUTION; }
+
+        if (p.x - p.r < 0) {
+            if (!inGoalY) { p.x = p.r; if (p.vx < 0) p.vx *= -WALL_RESTITUTION; }
+        } else if (p.x + p.r > CANVAS_WIDTH) {
+            if (!inGoalY) { p.x = CANVAS_WIDTH - p.r; if (p.vx > 0) p.vx *= -WALL_RESTITUTION; }
+        }
+    }
+
+    function resolveMalletCollision(p, m) {
+        let dx = p.x - m.x;
+        let dy = p.y - m.y;
+        let dist = Math.sqrt(dx * dx + dy * dy);
+        let minDist = p.r + m.r;
+
+        if (dist < minDist) {
+            let nx = dx / (dist || 1);
+            let ny = dy / (dist || 1);
+            let overlap = minDist - dist;
+
+            p.x += nx * overlap;
+            p.y += ny * overlap;
+
+            let inGoalY = (p.y - p.r * 0.3 >= goalTop) && (p.y + p.r * 0.3 <= goalBottom);
+            let wallHit = false;
+
+            if (p.y - p.r < 0) { p.y = p.r; wallHit = true; }
+            else if (p.y + p.r > CANVAS_HEIGHT) { p.y = CANVAS_HEIGHT - p.r; wallHit = true; }
+            if (!inGoalY) {
+                if (p.x - p.r < 0) { p.x = p.r; wallHit = true; }
+                else if (p.x + p.r > CANVAS_WIDTH) { p.x = CANVAS_WIDTH - p.r; wallHit = true; }
+            }
+
+            let dx2 = p.x - m.x;
+            let dy2 = p.y - m.y;
+            let dist2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+            if (dist2 < minDist) {
+                let overlap2 = minDist - dist2;
+                m.x -= (dx2 / dist2) * overlap2;
+                m.y -= (dy2 / dist2) * overlap2;
+                
+                if (wallHit) {
+                    p.vx += m.vx * 0.9;
+                    p.vy += m.vy * 0.9;
+                }
+            }
+
+            let vRel = (p.vx - m.vx) * nx + (p.vy - m.vy) * ny;
+            if (vRel < 0) {
+                let impulse = -(1 + MALLET_RESTITUTION) * vRel * 0.85;
+                p.vx += impulse * nx;
+                p.vy += impulse * ny;
+            }
+        }
+    }
+
+    function updatePhysics(tP1x, tP1y, tP2x, tP2y) {
+        let dt = 1 / SUB_STEPS;
+
+        p1.vx = tP1x - p1.x;
+        p1.vy = tP1y - p1.y;
+        p2.vx = tP2x - p2.x;
+        p2.vy = tP2y - p2.y;
+
+        for (let step = 0; step < SUB_STEPS; step++) {
+            puck.x += puck.vx * dt;
+            puck.y += puck.vy * dt;
+            p1.x += p1.vx * dt;
+            p1.y += p1.vy * dt;
+            p2.x += p2.vx * dt;
+            p2.y += p2.vy * dt;
+
+            p1.x = Math.max(p1.r, Math.min(CANVAS_WIDTH / 2 - p1.r, p1.x));
+            p1.y = Math.max(p1.r, Math.min(CANVAS_HEIGHT - p1.r, p1.y));
+            p2.x = Math.max(CANVAS_WIDTH / 2 + p2.r, Math.min(CANVAS_WIDTH - p2.r, p2.x));
+            p2.y = Math.max(p2.r, Math.min(CANVAS_HEIGHT - p2.r, p2.y));
+
+            resolveWallCollision(puck);
+            resolveMalletCollision(puck, p1);
+            resolveMalletCollision(puck, p2);
+            resolveWallCollision(puck);
+
+            if (puck.x < -puck.r) return 'goal_p2';
+            if (puck.x > CANVAS_WIDTH + puck.r) return 'goal_p1';
+        }
+
+        puck.vx *= FRICTION;
+        puck.vy *= FRICTION;
+
+        let speed = Math.sqrt(puck.vx * puck.vx + puck.vy * puck.vy);
+        if (speed > MAX_PUCK_SPEED) {
+            puck.vx = (puck.vx / speed) * MAX_PUCK_SPEED;
+            puck.vy = (puck.vy / speed) * MAX_PUCK_SPEED;
+        }
+
+        return null;
+    }
+
+    function update() {
+        if (role !== "host") return; // 演算はホスト側のみで実行
+
+        let targetP1X = Math.max(p1.r, Math.min(CANVAS_WIDTH / 2 - p1.r, p1Target.x));
+        let targetP1Y = Math.max(p1.r, Math.min(CANVAS_HEIGHT - p1.r, p1Target.y));
+        let targetP2X = Math.max(CANVAS_WIDTH / 2 + p2.r, Math.min(CANVAS_WIDTH - p2.r, p2Target.x));
+        let targetP2Y = Math.max(p2.r, Math.min(CANVAS_HEIGHT - p2.r, p2Target.y));
+
+        let result = updatePhysics(targetP1X, targetP1Y, targetP2X, targetP2Y);
+        
+        if (result === 'goal_p2') {
+            p2.score++;
+            document.getElementById('p2Score').innerText = p2.score;
+            resetPuck('p2');
+        } else if (result === 'goal_p1') {
+            p1.score++;
+            document.getElementById('p1Score').innerText = p1.score;
+            resetPuck('p1');
+        }
+
+        // ホストからゲストへ同期データを送信
+        if (conn && conn.open) {
+            conn.send({
+                type: "state",
+                puck: puck,
+                p1: p1,
+                p2: p2,
+                scores: { p1: p1.score, p2: p2.score }
+            });
+        }
+    }
+
+    // --- 描画ロジック ---
+    function draw() {
+        ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        // センターラインとサークル
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.12)";
+        ctx.lineWidth = 5;
+        ctx.beginPath(); ctx.moveTo(CANVAS_WIDTH / 2, 0); ctx.lineTo(CANVAS_WIDTH / 2, CANVAS_HEIGHT); ctx.stroke();
+        ctx.beginPath(); ctx.arc(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, CANVAS_HEIGHT / 4.5, 0, Math.PI * 2); ctx.stroke();
+
+        // ゴールエリア
+        ctx.fillStyle = "rgba(44, 62, 80, 0.25)";
+        ctx.fillRect(0, goalTop, 12, goalHeight);
+        ctx.fillRect(CANVAS_WIDTH - 12, goalTop, 12, goalHeight);
+
+        ctx.strokeStyle = "rgba(231, 76, 60, 0.8)";
+        ctx.lineWidth = 6;
+        ctx.beginPath();
+        ctx.moveTo(0, goalTop); ctx.lineTo(0, goalBottom);
+        ctx.moveTo(CANVAS_WIDTH, goalTop); ctx.lineTo(CANVAS_WIDTH, goalBottom);
+        ctx.stroke();
+
+        function drawEntity(obj, isMallet) {
+            ctx.beginPath();
+            ctx.arc(obj.x, obj.y, obj.r, 0, Math.PI * 2);
+            ctx.fillStyle = obj.color;
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
+            ctx.shadowBlur = 10;
+            ctx.shadowOffsetY = 4;
+            ctx.fill();
+            ctx.shadowColor = 'transparent';
+
+            if (isMallet) {
+                ctx.beginPath();
+                ctx.arc(obj.x, obj.y, obj.r * 0.45, 0, Math.PI * 2);
+                ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
+                ctx.fill();
+
+                if (obj.isHolding) {
+                    ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+                }
+            } else {
+                ctx.beginPath();
+                ctx.arc(obj.x, obj.y, obj.r * 0.7, 0, Math.PI * 2);
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+                ctx.lineWidth = 3;
+                ctx.stroke();
+            }
+        }
+
+        drawEntity(p1, true);
+        drawEntity(p2, true);
+        drawEntity(puck, false);
+    }
+
+    function loop() {
+        update();
+        draw();
+        requestAnimationFrame(loop);
+    }
+
+    loop();
+</script>
+</body>
+</html>

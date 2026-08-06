@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>エアホッケー（オンライン対戦版）</title>
+    <title>エアホッケー（オンライン対戦・修正版）</title>
 
     <!-- WebRTCライブラリ (PeerJS) -->
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
@@ -58,7 +58,6 @@
         .p1-score { color: #2ecc71; text-shadow: 0 0 10px rgba(46,204,113,0.5); }
         .p2-score { color: #3498db; text-shadow: 0 0 10px rgba(52,152,219,0.5); }
 
-        /* ロビー（接続メニュー） */
         #lobbyOverlay {
             position: absolute;
             top: 0;
@@ -141,7 +140,6 @@
 
         <canvas id="gameCanvas" width="1000" height="600"></canvas>
 
-        <!-- オンライン接続用UI -->
         <div id="lobbyOverlay">
             <div class="lobby-box">
                 <h2>オンライン対戦</h2>
@@ -172,11 +170,9 @@
     const canvas = document.getElementById("gameCanvas");
     const ctx = canvas.getContext("2d");
 
-    // 内部解像度を固定 (1000x600)
     const CANVAS_WIDTH = 1000;
     const CANVAS_HEIGHT = 600;
 
-    // 物理パラメータ
     const WALL_RESTITUTION = 0.8;
     const MALLET_RESTITUTION = 0.45;
     const FRICTION = 0.985;
@@ -197,12 +193,13 @@
     let p1Target = { x: p1.x, y: p1.y };
     let p2Target = { x: p2.x, y: p2.y };
 
-    // 役割定義 ("none", "host", "guest")
     let role = "none";
     let peer = null;
     let conn = null;
+    
+    // 独立した操作状態フラグ（受信データで上書きされないように保持）
+    let isMyHolding = false;
 
-    // --- 画面スケーリング考慮の座標取得 ---
     function getPos(e) {
         const rect = canvas.getBoundingClientRect();
         let clientX = e.touches ? e.touches[0].clientX : e.clientX;
@@ -217,39 +214,40 @@
         };
     }
 
-    // --- 入力イベント処理 ---
-    function handlePointerStart(e) {
-        if (role === "none") return;
-        const pos = getPos(e);
-        let myMallet = role === "host" ? p1 : p2;
-
-        let dx = pos.x - myMallet.x;
-        let dy = pos.y - myMallet.y;
-        if (Math.sqrt(dx * dx + dy * dy) <= myMallet.r * 2.5) {
-            myMallet.isHolding = true;
-        }
-    }
-
-    function handlePointerMove(e) {
-        if (role === "none") return;
-        const pos = getPos(e);
-
-        if (role === "host" && p1.isHolding) {
+    function sendTargetPos(pos) {
+        if (role === "host") {
             p1Target.x = pos.x;
             p1Target.y = pos.y;
-        } else if (role === "guest" && p2.isHolding) {
+            p1.isHolding = true;
+        } else if (role === "guest") {
             p2Target.x = pos.x;
             p2Target.y = pos.y;
-            // ゲストは自分の操作目標をホストに送信
             if (conn && conn.open) {
                 conn.send({ type: "input", target: p2Target });
             }
         }
     }
 
+    function handlePointerStart(e) {
+        if (role === "none") return;
+        const pos = getPos(e);
+
+        // 自分の陣地側を触った場合に操作を開始
+        if ((role === "host" && pos.x < CANVAS_WIDTH / 2) || (role === "guest" && pos.x >= CANVAS_WIDTH / 2)) {
+            isMyHolding = true;
+            sendTargetPos(pos);
+        }
+    }
+
+    function handlePointerMove(e) {
+        if (role === "none" || !isMyHolding) return;
+        const pos = getPos(e);
+        sendTargetPos(pos);
+    }
+
     function handlePointerEnd() {
+        isMyHolding = false;
         if (role === "host") p1.isHolding = false;
-        if (role === "guest") p2.isHolding = false;
     }
 
     canvas.addEventListener('touchstart', (e) => { e.preventDefault(); handlePointerStart(e); }, {passive: false});
@@ -260,7 +258,6 @@
     canvas.addEventListener('mousemove', handlePointerMove);
     window.addEventListener('mouseup', handlePointerEnd);
 
-    // --- オンライン接続 (PeerJS) ロジック ---
     function setStatus(text) {
         document.getElementById("statusText").innerText = "通信状態: " + text;
     }
@@ -280,7 +277,6 @@
         document.getElementById("joinMenu").style.display = "block";
     }
 
-    // ホストとして部屋作成
     function startHost() {
         role = "host";
         const roomCode = generateRoomCode();
@@ -306,7 +302,6 @@
         });
     }
 
-    // ゲストとして参加
     function startJoin() {
         const inputCode = document.getElementById("roomInput").value.trim().toUpperCase();
         if (!inputCode) return alert("あいことばを入力してください");
@@ -327,7 +322,6 @@
         });
     }
 
-    // 接続成立後の処理
     function setupConnection() {
         conn.on('open', () => {
             setStatus("接続完了！ゲーム開始");
@@ -336,13 +330,12 @@
 
         conn.on('data', (data) => {
             if (role === "host" && data.type === "input") {
-                // ホスト側：ゲストから入力座標を受信
                 p2Target = data.target;
             } else if (role === "guest" && data.type === "state") {
-                // ゲスト側：ホストから最新のゲーム状態を受信
                 puck = data.puck;
                 p1 = data.p1;
                 p2 = data.p2;
+                p2.isHolding = isMyHolding; // ゲスト自身の操作フラグを反映
                 document.getElementById('p1Score').innerText = data.scores.p1;
                 document.getElementById('p2Score').innerText = data.scores.p2;
             }
@@ -354,7 +347,6 @@
         });
     }
 
-    // --- 物理演算ロジック (ホストのみが実行) ---
     function resetPuck(scoredBy) {
         puck.x = CANVAS_WIDTH / 2;
         puck.y = CANVAS_HEIGHT / 2;
@@ -465,7 +457,7 @@
     }
 
     function update() {
-        if (role !== "host") return; // 演算はホスト側のみで実行
+        if (role !== "host") return;
 
         let targetP1X = Math.max(p1.r, Math.min(CANVAS_WIDTH / 2 - p1.r, p1Target.x));
         let targetP1Y = Math.max(p1.r, Math.min(CANVAS_HEIGHT - p1.r, p1Target.y));
@@ -484,7 +476,6 @@
             resetPuck('p1');
         }
 
-        // ホストからゲストへ同期データを送信
         if (conn && conn.open) {
             conn.send({
                 type: "state",
@@ -496,17 +487,14 @@
         }
     }
 
-    // --- 描画ロジック ---
     function draw() {
         ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-        // センターラインとサークル
         ctx.strokeStyle = "rgba(0, 0, 0, 0.12)";
         ctx.lineWidth = 5;
         ctx.beginPath(); ctx.moveTo(CANVAS_WIDTH / 2, 0); ctx.lineTo(CANVAS_WIDTH / 2, CANVAS_HEIGHT); ctx.stroke();
         ctx.beginPath(); ctx.arc(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, CANVAS_HEIGHT / 4.5, 0, Math.PI * 2); ctx.stroke();
 
-        // ゴールエリア
         ctx.fillStyle = "rgba(44, 62, 80, 0.25)";
         ctx.fillRect(0, goalTop, 12, goalHeight);
         ctx.fillRect(CANVAS_WIDTH - 12, goalTop, 12, goalHeight);

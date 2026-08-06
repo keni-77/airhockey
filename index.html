@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>エアホッケー（卓球ルール・オンライン対戦版）</title>
+    <title>エアホッケー（ローカル＆オンライン対戦版）</title>
 
     <!-- WebRTCライブラリ (PeerJS) -->
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
@@ -65,7 +65,7 @@
             font-size: 22px;
             font-weight: 900;
             color: #e74c3c;
-            background: rgba(255, 255, 255, 0.9);
+            background: rgba(255, 255, 255, 0.95);
             padding: 4px 16px;
             border-radius: 20px;
             box-shadow: 0 0 15px rgba(231, 76, 60, 0.6);
@@ -121,6 +121,8 @@
             transition: 0.2s;
         }
         .btn:disabled { background: #7f8c8d; cursor: not-allowed; }
+        .btn-local { background: #f39c12; }
+        .btn-local:hover { background: #d35400; }
         .btn-host { background: #2ecc71; }
         .btn-host:hover { background: #27ae60; }
         .btn-danger { background: #e74c3c; }
@@ -157,40 +159,49 @@
         #resultTitle { font-size: 36px; font-weight: 900; margin-bottom: 10px; }
         .win-text { color: #2ecc71; text-shadow: 0 0 15px rgba(46,204,113,0.6); }
         .lose-text { color: #e74c3c; text-shadow: 0 0 15px rgba(231,76,60,0.6); }
+        .p1-win-text { color: #2ecc71; text-shadow: 0 0 15px rgba(46,204,113,0.6); }
+        .p2-win-text { color: #3498db; text-shadow: 0 0 15px rgba(52,152,219,0.6); }
     </style>
 </head>
 <body>
 
     <div id="gameContainer">
         <div id="scoreBoard">
-            <div class="p1-score">1P (Host): <span id="p1Score">0</span></div>
-            <div class="p2-score">2P (Guest): <span id="p2Score">0</span></div>
+            <div class="p1-score">1P: <span id="p1Score">0</span></div>
+            <div class="p2-score">2P: <span id="p2Score">0</span></div>
         </div>
 
         <div id="matchPointBanner">MATCH POINT</div>
 
         <canvas id="gameCanvas" width="1000" height="600"></canvas>
 
-        <!-- 初期ロビー画面 -->
+        <!-- モード選択・ロビー画面 -->
         <div id="lobbyOverlay" class="overlay">
             <div class="dialog-box">
-                <h2>オンライン対戦</h2>
+                <h2>エアホッケー</h2>
                 
-                <div id="initialMenu">
+                <div id="modeSelectMenu">
+                    <button class="btn btn-local" onclick="startLocalGame()">2人プレイ (1台で対戦)</button>
+                    <button class="btn" onclick="showOnlineMenu()">オンライン対戦</button>
+                </div>
+
+                <div id="onlineMenu" style="display: none;">
                     <button class="btn btn-host" onclick="startHost()">部屋を作る (ホスト)</button>
                     <button class="btn" onclick="showJoinInput()">部屋に入る (ゲスト)</button>
+                    <button class="btn" style="background: #7f8c8d;" onclick="showHomeMenu()">戻る</button>
                 </div>
 
                 <div id="hostMenu" style="display: none;">
                     <div>あいことば</div>
                     <div id="roomCodeDisplay">----</div>
                     <div>対戦相手の接続を待っています...</div>
+                    <button class="btn" style="background: #7f8c8d;" onclick="clickLeave()">キャンセル</button>
                 </div>
 
                 <div id="joinMenu" style="display: none;">
                     <input type="text" id="roomInput" placeholder="あいことばを入力" maxlength="5">
                     <button class="btn" onclick="startJoin()">接続する</button>
-                    <button class="btn" style="background: #7f8c8d;" onclick="resetMenu()">戻る</button>
+                    <button class="btn" style="background: #7f8c8d;" onclick="showOnlineMenu()">戻る</button>
                 </div>
 
                 <div id="statusText">通信状態: 未接続</div>
@@ -200,7 +211,7 @@
         <!-- 試合終了リザルト画面 -->
         <div id="resultOverlay" class="overlay" style="display: none;">
             <div class="dialog-box">
-                <div id="resultTitle">YOU WIN!</div>
+                <div id="resultTitle">1P WIN!</div>
                 <div id="resultScoreDetail" style="margin-bottom: 20px; font-size: 18px; color: #ecf0f1;"></div>
                 
                 <button id="retryBtn" class="btn btn-host" onclick="clickRetry()">もう一回プレイ</button>
@@ -237,7 +248,7 @@
     let p1Target = { x: p1.x, y: p1.y };
     let p2Target = { x: p2.x, y: p2.y };
 
-    let role = "none"; // "host", "guest"
+    let gameMode = "none"; // "local", "host", "guest"
     let gameState = "lobby"; // "lobby", "playing", "ended"
     let winner = null; // "p1", "p2"
     let matchPointState = null; // "p1", "p2", null
@@ -245,19 +256,18 @@
     let peer = null;
     let conn = null;
 
-    // タッチ＆ドラッグ操作変数
-    let isMyHolding = false;
-    let dragOffset = { x: 0, y: 0 };
+    // タッチトラッキング (マルチタッチ対応)
+    let p1TouchId = null;
+    let p2TouchId = null;
+    let p1Offset = { x: 0, y: 0 };
+    let p2Offset = { x: 0, y: 0 };
 
     // リトライフラグ
     let p1Retry = false;
     let p2Retry = false;
 
-    function getPos(e) {
+    function getCanvasPos(clientX, clientY) {
         const rect = canvas.getBoundingClientRect();
-        let clientX = e.touches ? e.touches[0].clientX : e.clientX;
-        let clientY = e.touches ? e.touches[0].clientY : e.clientY;
-
         let scaleX = CANVAS_WIDTH / rect.width;
         let scaleY = CANVAS_HEIGHT / rect.height;
 
@@ -267,79 +277,126 @@
         };
     }
 
-    // --- ホッケーを押してからドラッグの操作判定 ---
-    function handlePointerStart(e) {
-        if (role === "none" || gameState !== "playing") return;
-        const pos = getPos(e);
-        let myMallet = role === "host" ? p1 : p2;
+    // --- タッチ＆ドラッグ操作処理 (マルチタッチ対応) ---
+    function handleTouchStart(e) {
+        if (gameState !== "playing") return;
 
-        // タッチ位置がマレットの範囲内かチェック (押しやすいように判定を広めに)
-        let dx = pos.x - myMallet.x;
-        let dy = pos.y - myMallet.y;
-        let dist = Math.sqrt(dx * dx + dy * dy);
+        const touches = e.changedTouches || [e];
+        for (let i = 0; i < touches.length; i++) {
+            let t = touches[i];
+            let id = t.identifier !== undefined ? t.identifier : "mouse";
+            let pos = getCanvasPos(t.clientX, t.clientY);
 
-        if (dist <= myMallet.r * 1.8) {
-            isMyHolding = true;
-            dragOffset.x = pos.x - myMallet.x;
-            dragOffset.y = pos.y - myMallet.y;
-        }
-    }
-
-    function handlePointerMove(e) {
-        if (role === "none" || !isMyHolding || gameState !== "playing") return;
-        const pos = getPos(e);
-
-        let targetPos = {
-            x: pos.x - dragOffset.x,
-            y: pos.y - dragOffset.y
-        };
-
-        if (role === "host") {
-            p1Target = targetPos;
-        } else if (role === "guest") {
-            p2Target = targetPos;
-            if (conn && conn.open) {
-                conn.send({ type: "input", target: p2Target });
+            // ローカル対戦：左半分タッチで1P、右半分タッチで2Pを掴む
+            if (gameMode === "local") {
+                if (pos.x < CANVAS_WIDTH / 2 && p1TouchId === null) {
+                    let dx = pos.x - p1.x, dy = pos.y - p1.y;
+                    if (Math.sqrt(dx * dx + dy * dy) <= p1.r * 2.0) {
+                        p1TouchId = id;
+                        p1Offset = { x: pos.x - p1.x, y: pos.y - p1.y };
+                    }
+                } else if (pos.x >= CANVAS_WIDTH / 2 && p2TouchId === null) {
+                    let dx = pos.x - p2.x, dy = pos.y - p2.y;
+                    if (Math.sqrt(dx * dx + dy * dy) <= p2.r * 2.0) {
+                        p2TouchId = id;
+                        p2Offset = { x: pos.x - p2.x, y: pos.y - p2.y };
+                    }
+                }
+            } 
+            // オンライン対戦（ホスト＝1P、ゲスト＝2P）
+            else if (gameMode === "host") {
+                let dx = pos.x - p1.x, dy = pos.y - p1.y;
+                if (Math.sqrt(dx * dx + dy * dy) <= p1.r * 2.0) {
+                    p1TouchId = id;
+                    p1Offset = { x: pos.x - p1.x, y: pos.y - p1.y };
+                }
+            } else if (gameMode === "guest") {
+                let dx = pos.x - p2.x, dy = pos.y - p2.y;
+                if (Math.sqrt(dx * dx + dy * dy) <= p2.r * 2.0) {
+                    p2TouchId = id;
+                    p2Offset = { x: pos.x - p2.x, y: pos.y - p2.y };
+                }
             }
         }
     }
 
-    function handlePointerEnd() {
-        isMyHolding = false;
+    function handleTouchMove(e) {
+        if (gameState !== "playing") return;
+
+        const touches = e.changedTouches || [e];
+        for (let i = 0; i < touches.length; i++) {
+            let t = touches[i];
+            let id = t.identifier !== undefined ? t.identifier : "mouse";
+            let pos = getCanvasPos(t.clientX, t.clientY);
+
+            if (p1TouchId === id) {
+                p1Target.x = pos.x - p1Offset.x;
+                p1Target.y = pos.y - p1Offset.y;
+            }
+            if (p2TouchId === id) {
+                p2Target.x = pos.x - p2Offset.x;
+                p2Target.y = pos.y - p2Offset.y;
+                if (gameMode === "guest" && conn && conn.open) {
+                    conn.send({ type: "input", target: p2Target });
+                }
+            }
+        }
     }
 
-    canvas.addEventListener('touchstart', (e) => { e.preventDefault(); handlePointerStart(e); }, {passive: false});
-    canvas.addEventListener('touchmove', (e) => { e.preventDefault(); handlePointerMove(e); }, {passive: false});
-    canvas.addEventListener('touchend', handlePointerEnd);
+    function handleTouchEnd(e) {
+        const touches = e.changedTouches || [e];
+        for (let i = 0; i < touches.length; i++) {
+            let id = touches[i].identifier !== undefined ? touches[i].identifier : "mouse";
+            if (p1TouchId === id) p1TouchId = null;
+            if (p2TouchId === id) p2TouchId = null;
+        }
+    }
 
-    canvas.addEventListener('mousedown', handlePointerStart);
-    canvas.addEventListener('mousemove', handlePointerMove);
-    window.addEventListener('mouseup', handlePointerEnd);
+    canvas.addEventListener('touchstart', (e) => { e.preventDefault(); handleTouchStart(e); }, {passive: false});
+    canvas.addEventListener('touchmove', (e) => { e.preventDefault(); handleTouchMove(e); }, {passive: false});
+    canvas.addEventListener('touchend', handleTouchEnd);
+    canvas.addEventListener('touchcancel', handleTouchEnd);
 
-    // --- PeerJS / ネットワーク関連 ---
+    canvas.addEventListener('mousedown', handleTouchStart);
+    canvas.addEventListener('mousemove', handleTouchMove);
+    window.addEventListener('mouseup', handleTouchEnd);
+
+    // --- メニュー切替 ---
     function setStatus(text) {
         document.getElementById("statusText").innerText = "通信状態: " + text;
     }
 
-    function generateRoomCode() {
-        return Math.random().toString(36).substring(2, 7).toUpperCase();
+    function showHomeMenu() {
+        document.getElementById("modeSelectMenu").style.display = "block";
+        document.getElementById("onlineMenu").style.display = "none";
+        document.getElementById("hostMenu").style.display = "none";
+        document.getElementById("joinMenu").style.display = "none";
+        setStatus("未接続");
     }
 
-    function resetMenu() {
-        document.getElementById("initialMenu").style.display = "block";
+    function showOnlineMenu() {
+        document.getElementById("modeSelectMenu").style.display = "none";
+        document.getElementById("onlineMenu").style.display = "block";
         document.getElementById("hostMenu").style.display = "none";
         document.getElementById("joinMenu").style.display = "none";
     }
 
     function showJoinInput() {
-        document.getElementById("initialMenu").style.display = "none";
+        document.getElementById("onlineMenu").style.display = "none";
         document.getElementById("joinMenu").style.display = "block";
     }
 
+    // --- ゲームモード開始処理 ---
+    function startLocalGame() {
+        gameMode = "local";
+        document.getElementById("lobbyOverlay").style.display = "none";
+        startNewMatch();
+    }
+
     function startHost() {
-        role = "host";
-        const roomCode = generateRoomCode();
-        document.getElementById("initialMenu").style.display = "none";
+        gameMode = "host";
+        const roomCode = Math.random().toString(36).substring(2, 7).toUpperCase();
+        document.getElementById("onlineMenu").style.display = "none";
         document.getElementById("hostMenu").style.display = "block";
         document.getElementById("roomCodeDisplay").innerText = roomCode;
         setStatus("部屋を作成中...");
@@ -352,8 +409,8 @@
             setupConnection();
         });
         peer.on('error', (err) => {
-            alert("通信エラー: " + err);
-            location.reload();
+            alert("通信エラーが発生しました: " + err);
+            clickLeave();
         });
     }
 
@@ -361,7 +418,7 @@
         const inputCode = document.getElementById("roomInput").value.trim().toUpperCase();
         if (!inputCode) return alert("あいことばを入力してください");
 
-        role = "guest";
+        gameMode = "guest";
         setStatus("ホストに接続中...");
 
         peer = new Peer();
@@ -371,7 +428,7 @@
         });
         peer.on('error', (err) => {
             alert("接続に失敗しました。あいことばを確認してください。");
-            setStatus("接続失敗");
+            clickLeave();
         });
     }
 
@@ -379,13 +436,13 @@
         conn.on('open', () => {
             setStatus("接続完了！");
             document.getElementById("lobbyOverlay").style.display = "none";
-            if (role === "host") {
+            if (gameMode === "host") {
                 startNewMatch();
             }
         });
 
         conn.on('data', (data) => {
-            if (role === "host") {
+            if (gameMode === "host") {
                 if (data.type === "input") {
                     p2Target = data.target;
                 } else if (data.type === "retry") {
@@ -393,9 +450,9 @@
                     checkBothRetry();
                 } else if (data.type === "leave") {
                     alert("対戦相手が退出しました。");
-                    location.reload();
+                    clickLeave();
                 }
-            } else if (role === "guest") {
+            } else if (gameMode === "guest") {
                 if (data.type === "state") {
                     puck = data.puck;
                     p1 = data.p1;
@@ -412,14 +469,14 @@
                     updateUIByState();
                 } else if (data.type === "leave") {
                     alert("対戦相手が退出しました。");
-                    location.reload();
+                    clickLeave();
                 }
             }
         });
 
         conn.on('close', () => {
             alert("対戦相手との通信が切断されました。");
-            location.reload();
+            clickLeave();
         });
     }
 
@@ -428,7 +485,7 @@
         let s1 = p1.score;
         let s2 = p2.score;
 
-        // 勝敗チェック (11点以上、かつ2点差)
+        // 勝敗チェック (11点以上かつ2点差)
         if ((s1 >= 11 || s2 >= 11) && Math.abs(s1 - s2) >= 2) {
             winner = s1 > s2 ? "p1" : "p2";
             gameState = "ended";
@@ -437,7 +494,7 @@
             return;
         }
 
-        // マッチポイント判定 (あと1点で勝利が決まる状態)
+        // マッチポイント判定
         if (s1 >= 10 && s1 > s2) {
             matchPointState = "p1";
         } else if (s2 >= 10 && s2 > s1) {
@@ -449,18 +506,22 @@
         updateUIByState();
     }
 
-    // --- もう一回プレイ / 退出 ---
+    // --- リトライ・退出 ---
     function clickRetry() {
-        document.getElementById("retryBtn").disabled = true;
-        document.getElementById("retryStatusText").innerText = "相手の準備待ち...";
+        if (gameMode === "local") {
+            startNewMatch();
+        } else {
+            document.getElementById("retryBtn").disabled = true;
+            document.getElementById("retryStatusText").innerText = "相手の準備待ち...";
 
-        if (role === "host") {
-            p1Retry = true;
-            checkBothRetry();
-        } else if (role === "guest") {
-            p2Retry = true;
-            if (conn && conn.open) {
-                conn.send({ type: "retry" });
+            if (gameMode === "host") {
+                p1Retry = true;
+                checkBothRetry();
+            } else if (gameMode === "guest") {
+                p2Retry = true;
+                if (conn && conn.open) {
+                    conn.send({ type: "retry" });
+                }
             }
         }
     }
@@ -482,6 +543,9 @@
         matchPointState = null;
         gameState = "playing";
 
+        p1TouchId = null;
+        p2TouchId = null;
+
         resetPuck('p1');
         p1Target = { x: 120, y: CANVAS_HEIGHT / 2 };
         p2Target = { x: CANVAS_WIDTH - 120, y: CANVAS_HEIGHT / 2 };
@@ -497,8 +561,20 @@
     function clickLeave() {
         if (conn && conn.open) {
             conn.send({ type: "leave" });
+            conn.close();
         }
-        setTimeout(() => { location.reload(); }, 100);
+        if (peer) {
+            peer.destroy();
+        }
+
+        peer = null;
+        conn = null;
+        gameMode = "none";
+        gameState = "lobby";
+
+        document.getElementById("resultOverlay").style.display = "none";
+        document.getElementById("lobbyOverlay").style.display = "flex";
+        showHomeMenu();
     }
 
     function updateUIByState() {
@@ -521,27 +597,34 @@
         if (gameState === "ended") {
             resultOverlay.style.display = "flex";
 
-            let isIWin = (role === "host" && winner === "p1") || (role === "guest" && winner === "p2");
-            if (isIWin) {
-                resultTitle.innerText = "YOU WIN!";
-                resultTitle.className = "win-text";
+            if (gameMode === "local") {
+                resultTitle.innerText = winner === "p1" ? "1P WIN!" : "2P WIN!";
+                resultTitle.className = winner === "p1" ? "p1-win-text" : "p2-win-text";
+                retryBtn.disabled = false;
+                retryStatusText.innerText = "";
             } else {
-                resultTitle.innerText = "YOU LOSE!";
-                resultTitle.className = "lose-text";
+                let isIWin = (gameMode === "host" && winner === "p1") || (gameMode === "guest" && winner === "p2");
+                if (isIWin) {
+                    resultTitle.innerText = "YOU WIN!";
+                    resultTitle.className = "win-text";
+                } else {
+                    resultTitle.innerText = "YOU LOSE!";
+                    resultTitle.className = "lose-text";
+                }
+
+                let myRetry = gameMode === "host" ? p1Retry : p2Retry;
+                let otherRetry = gameMode === "host" ? p2Retry : p1Retry;
+
+                if (myRetry) {
+                    retryBtn.disabled = true;
+                    retryStatusText.innerText = otherRetry ? "再開中..." : "相手の準備待ち...";
+                } else {
+                    retryBtn.disabled = false;
+                    retryStatusText.innerText = otherRetry ? "相手は準備完了しています！" : "";
+                }
             }
 
             resultScoreDetail.innerText = `スコア: 1P ${p1.score} - ${p2.score} 2P`;
-
-            let myRetry = role === "host" ? p1Retry : p2Retry;
-            let otherRetry = role === "host" ? p2Retry : p1Retry;
-
-            if (myRetry) {
-                retryBtn.disabled = true;
-                retryStatusText.innerText = otherRetry ? "再開中..." : "相手の準備待ち...";
-            } else {
-                retryBtn.disabled = false;
-                retryStatusText.innerText = otherRetry ? "相手は準備完了しています！" : "";
-            }
         } else {
             resultOverlay.style.display = "none";
         }
@@ -658,7 +741,8 @@
     }
 
     function update() {
-        if (role !== "host" || gameState !== "playing") return;
+        // ローカルおよびホスト側で物理演算を実行
+        if ((gameMode !== "local" && gameMode !== "host") || gameState !== "playing") return;
 
         let targetP1X = Math.max(p1.r, Math.min(CANVAS_WIDTH / 2 - p1.r, p1Target.x));
         let targetP1Y = Math.max(p1.r, Math.min(CANVAS_HEIGHT - p1.r, p1Target.y));
@@ -679,8 +763,8 @@
             checkTableTennisRules();
         }
 
-        // ゲスト側へ全体状態を送信
-        if (conn && conn.open) {
+        // オンライン接続時：ゲストへ状態同期
+        if (gameMode === "host" && conn && conn.open) {
             conn.send({
                 type: "state",
                 puck: puck,
@@ -716,7 +800,7 @@
         ctx.moveTo(CANVAS_WIDTH, goalTop); ctx.lineTo(CANVAS_WIDTH, goalBottom);
         ctx.stroke();
 
-        function drawEntity(obj, isMallet, isMine) {
+        function drawEntity(obj, isMallet, isHolding) {
             ctx.beginPath();
             ctx.arc(obj.x, obj.y, obj.r, 0, Math.PI * 2);
             ctx.fillStyle = obj.color;
@@ -732,7 +816,7 @@
                 ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
                 ctx.fill();
 
-                if (isMine && isMyHolding) {
+                if (isHolding) {
                     ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
                     ctx.lineWidth = 4;
                     ctx.stroke();
@@ -746,8 +830,8 @@
             }
         }
 
-        drawEntity(p1, true, role === "host");
-        drawEntity(p2, true, role === "guest");
+        drawEntity(p1, true, p1TouchId !== null);
+        drawEntity(p2, true, p2TouchId !== null);
         drawEntity(puck, false, false);
     }
 

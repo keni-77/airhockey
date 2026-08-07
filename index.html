@@ -123,6 +123,8 @@
         .btn:disabled { background: #7f8c8d; cursor: not-allowed; }
         .btn-local { background: #f39c12; }
         .btn-local:hover { background: #d35400; }
+        .btn-online { background: #9b59b6; }
+        .btn-online:hover { background: #8e44ad; }
         .btn-host { background: #2ecc71; }
         .btn-host:hover { background: #27ae60; }
         .btn-danger { background: #e74c3c; }
@@ -180,17 +182,21 @@
             <div class="dialog-box">
                 <h2>エアホッケー</h2>
                 
+                <!-- ホームメニュー -->
                 <div id="modeSelectMenu">
                     <button class="btn btn-local" onclick="startLocalGame()">2人プレイ (1台で対戦)</button>
                     <button class="btn" onclick="showOnlineMenu()">オンライン対戦</button>
                 </div>
 
+                <!-- オンライン対戦メニュー -->
                 <div id="onlineMenu" style="display: none;">
-                    <button class="btn btn-host" onclick="startHost()">部屋を作る (ホスト)</button>
-                    <button class="btn" onclick="showJoinInput()">部屋に入る (ゲスト)</button>
+                    <button class="btn btn-online" onclick="startQuickMatch()">クイックマッチ (自動対戦)</button>
+                    <button class="btn btn-host" onclick="startHost()">部屋を作る (あいことば)</button>
+                    <button class="btn" onclick="showJoinInput()">部屋に入る (あいことば)</button>
                     <button class="btn" style="background: #7f8c8d;" onclick="showHomeMenu()">戻る</button>
                 </div>
 
+                <!-- 部屋作成画面 (ホスト) -->
                 <div id="hostMenu" style="display: none;">
                     <div>あいことば</div>
                     <div id="roomCodeDisplay">----</div>
@@ -198,10 +204,17 @@
                     <button class="btn" style="background: #7f8c8d;" onclick="clickLeave()">キャンセル</button>
                 </div>
 
+                <!-- 部屋参加画面 (ゲスト) -->
                 <div id="joinMenu" style="display: none;">
                     <input type="text" id="roomInput" placeholder="あいことばを入力" maxlength="5">
                     <button class="btn" onclick="startJoin()">接続する</button>
                     <button class="btn" style="background: #7f8c8d;" onclick="showOnlineMenu()">戻る</button>
+                </div>
+
+                <!-- クイックマッチ待機画面 -->
+                <div id="matchingMenu" style="display: none;">
+                    <div style="color: #f1c40f; font-weight: bold; margin-bottom: 10px;">対戦相手を探しています...</div>
+                    <button class="btn" style="background: #7f8c8d;" onclick="clickLeave()">キャンセル</button>
                 </div>
 
                 <div id="statusText">通信状態: 未接続</div>
@@ -233,6 +246,9 @@
     const FRICTION = 0.985;
     const SUB_STEPS = 10;
     const MAX_PUCK_SPEED = 55;
+
+    // クイックマッチ用ID
+    const MATCHMAKER_QUEUE_ID = "hockey-quick-match-v2";
 
     const goalHeight = CANVAS_HEIGHT / 2.3;
     const malletRadius = Math.min(CANVAS_WIDTH, CANVAS_HEIGHT) / 12;
@@ -277,7 +293,7 @@
         };
     }
 
-    // --- タッチ＆ドラッグ操作処理 (マルチタッチ対応) ---
+    // --- タッチ＆ドラッグ操作処理 ---
     function handleTouchStart(e) {
         if (gameState !== "playing") return;
 
@@ -287,7 +303,6 @@
             let id = t.identifier !== undefined ? t.identifier : "mouse";
             let pos = getCanvasPos(t.clientX, t.clientY);
 
-            // ローカル対戦：左半分タッチで1P、右半分タッチで2Pを掴む
             if (gameMode === "local") {
                 if (pos.x < CANVAS_WIDTH / 2 && p1TouchId === null) {
                     let dx = pos.x - p1.x, dy = pos.y - p1.y;
@@ -302,9 +317,7 @@
                         p2Offset = { x: pos.x - p2.x, y: pos.y - p2.y };
                     }
                 }
-            } 
-            // オンライン対戦（ホスト＝1P、ゲスト＝2P）
-            else if (gameMode === "host") {
+            } else if (gameMode === "host") {
                 let dx = pos.x - p1.x, dy = pos.y - p1.y;
                 if (Math.sqrt(dx * dx + dy * dy) <= p1.r * 2.0) {
                     p1TouchId = id;
@@ -371,6 +384,7 @@
         document.getElementById("onlineMenu").style.display = "none";
         document.getElementById("hostMenu").style.display = "none";
         document.getElementById("joinMenu").style.display = "none";
+        document.getElementById("matchingMenu").style.display = "none";
         setStatus("未接続");
     }
 
@@ -379,6 +393,7 @@
         document.getElementById("onlineMenu").style.display = "block";
         document.getElementById("hostMenu").style.display = "none";
         document.getElementById("joinMenu").style.display = "none";
+        document.getElementById("matchingMenu").style.display = "none";
     }
 
     function showJoinInput() {
@@ -393,6 +408,7 @@
         startNewMatch();
     }
 
+    // あいことば部屋作成 (ホスト)
     function startHost() {
         gameMode = "host";
         const roomCode = Math.random().toString(36).substring(2, 7).toUpperCase();
@@ -414,6 +430,7 @@
         });
     }
 
+    // あいことば部屋参加 (ゲスト)
     function startJoin() {
         const inputCode = document.getElementById("roomInput").value.trim().toUpperCase();
         if (!inputCode) return alert("あいことばを入力してください");
@@ -432,14 +449,81 @@
         });
     }
 
+    // クイックマッチ (自動マッチング)
+    function startQuickMatch() {
+        document.getElementById("onlineMenu").style.display = "none";
+        document.getElementById("matchingMenu").style.display = "block";
+        setStatus("対戦相手を探しています...");
+
+        gameMode = "guest";
+        peer = new Peer();
+
+        peer.on('open', () => {
+            conn = peer.connect(MATCHMAKER_QUEUE_ID);
+            let isConnected = false;
+
+            conn.on('open', () => {
+                isConnected = true;
+                setupConnection();
+            });
+
+            setTimeout(() => {
+                if (!isConnected) {
+                    if (conn) conn.close();
+                    if (peer) peer.destroy();
+                    becomeQuickMatchHost();
+                }
+            }, 1500);
+        });
+
+        peer.on('error', () => {
+            if (peer) peer.destroy();
+            becomeQuickMatchHost();
+        });
+    }
+
+    function becomeQuickMatchHost() {
+        gameMode = "host";
+        setStatus("対戦相手の参加を待っています...");
+
+        peer = new Peer(MATCHMAKER_QUEUE_ID);
+
+        peer.on('open', () => {
+            peer.on('connection', (c) => {
+                if (gameState === "playing") {
+                    c.close();
+                    return;
+                }
+                conn = c;
+                setupConnection();
+            });
+        });
+
+        peer.on('error', (err) => {
+            if (err.type === 'unavailable-id') {
+                setTimeout(startQuickMatch, 500);
+            } else {
+                alert("通信エラーが発生しました: " + err.type);
+                clickLeave();
+            }
+        });
+    }
+
     function setupConnection() {
-        conn.on('open', () => {
+        const onOpen = () => {
             setStatus("接続完了！");
             document.getElementById("lobbyOverlay").style.display = "none";
             if (gameMode === "host") {
                 startNewMatch();
             }
-        });
+        };
+
+        // 接続状態に応じて直接実行またはイベント待機
+        if (conn.open) {
+            onOpen();
+        } else {
+            conn.on('open', onOpen);
+        }
 
         conn.on('data', (data) => {
             if (gameMode === "host") {
@@ -454,6 +538,9 @@
                 }
             } else if (gameMode === "guest") {
                 if (data.type === "state") {
+                    // データ受信時にも確実にロビー画面を非表示化
+                    document.getElementById("lobbyOverlay").style.display = "none";
+
                     puck = data.puck;
                     p1 = data.p1;
                     p2 = data.p2;
@@ -485,7 +572,6 @@
         let s1 = p1.score;
         let s2 = p2.score;
 
-        // 勝敗チェック (11点以上かつ2点差)
         if ((s1 >= 11 || s2 >= 11) && Math.abs(s1 - s2) >= 2) {
             winner = s1 > s2 ? "p1" : "p2";
             gameState = "ended";
@@ -494,7 +580,6 @@
             return;
         }
 
-        // マッチポイント判定
         if (s1 >= 10 && s1 > s2) {
             matchPointState = "p1";
         } else if (s2 >= 10 && s2 > s1) {
@@ -585,7 +670,6 @@
         const retryBtn = document.getElementById("retryBtn");
         const retryStatusText = document.getElementById("retryStatusText");
 
-        // マッチポイント表示
         if (gameState === "playing" && matchPointState) {
             mpBanner.style.display = "block";
             mpBanner.innerText = `MATCH POINT (${matchPointState.toUpperCase()})`;
@@ -593,7 +677,6 @@
             mpBanner.style.display = "none";
         }
 
-        // リザルト画面表示
         if (gameState === "ended") {
             resultOverlay.style.display = "flex";
 
@@ -741,7 +824,6 @@
     }
 
     function update() {
-        // ローカルおよびホスト側で物理演算を実行
         if ((gameMode !== "local" && gameMode !== "host") || gameState !== "playing") return;
 
         let targetP1X = Math.max(p1.r, Math.min(CANVAS_WIDTH / 2 - p1.r, p1Target.x));
@@ -763,7 +845,6 @@
             checkTableTennisRules();
         }
 
-        // オンライン接続時：ゲストへ状態同期
         if (gameMode === "host" && conn && conn.open) {
             conn.send({
                 type: "state",
@@ -782,13 +863,11 @@
     function draw() {
         ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-        // センターライン＆サークル
         ctx.strokeStyle = "rgba(0, 0, 0, 0.12)";
         ctx.lineWidth = 5;
         ctx.beginPath(); ctx.moveTo(CANVAS_WIDTH / 2, 0); ctx.lineTo(CANVAS_WIDTH / 2, CANVAS_HEIGHT); ctx.stroke();
         ctx.beginPath(); ctx.arc(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, CANVAS_HEIGHT / 4.5, 0, Math.PI * 2); ctx.stroke();
 
-        // ゴールエリア
         ctx.fillStyle = "rgba(44, 62, 80, 0.25)";
         ctx.fillRect(0, goalTop, 12, goalHeight);
         ctx.fillRect(CANVAS_WIDTH - 12, goalTop, 12, goalHeight);
